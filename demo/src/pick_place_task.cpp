@@ -39,6 +39,9 @@
 #include <geometry_msgs/msg/pose.hpp>
 #include <tf2_eigen/tf2_eigen.hpp>
 
+#include <map>
+#include <cmath>
+
 static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_task_constructor_demo");
 
 namespace {
@@ -97,39 +100,14 @@ void setupDemoScene(const pick_place_task_demo::Params& params) {
 	spawnObject(psi, createObject(params));
 }
 
-PickPlaceTask::PickPlaceTask(const std::string& task_name) : task_name_(task_name) {}
+std::unique_ptr<SerialContainer> PickPlaceContainer(const pick_place_task_demo::Params& params, moveit::task_constructor::Task& t, const solvers::PlannerInterfacePtr& sampling_planner,
+										   const solvers::PlannerInterfacePtr& cartesian_planner, const geometry_msgs::msg::PoseStamped& place_pose)
+{
 
-bool PickPlaceTask::init(const rclcpp::Node::SharedPtr& node, const pick_place_task_demo::Params& params) {
-	RCLCPP_INFO(LOGGER, "Initializing task pipeline");
+	auto serial_container = std::make_unique<SerialContainer>("pick/place");
+	t.properties().exposeTo(serial_container->properties(), { "eef", "hand", "group", "ik_frame" });
+	serial_container->properties().configureInitFrom(Stage::PARENT, { "eef", "hand", "group", "ik_frame" });
 
-	// Reset ROS introspection before constructing the new object
-	// TODO(v4hn): global storage for Introspection services to enable one-liner
-	task_.reset();
-	task_.reset(new moveit::task_constructor::Task());
-
-	// Individual movement stages are collected within the Task object
-	Task& t = *task_;
-	t.stages()->setName(task_name_);
-	t.loadRobotModel(node);
-
-	/* Create planners used in various stages. Various options are available,
-	   namely Cartesian, MoveIt pipeline, and joint interpolation. */
-	// Sampling planner
-	auto sampling_planner = std::make_shared<solvers::PipelinePlanner>(node);
-	sampling_planner->setProperty("goal_joint_tolerance", 1e-5);
-
-	// Cartesian planner
-	auto cartesian_planner = std::make_shared<solvers::CartesianPath>();
-	cartesian_planner->setMaxVelocityScalingFactor(1.0);
-	cartesian_planner->setMaxAccelerationScalingFactor(1.0);
-	cartesian_planner->setStepSize(.01);
-
-	// Set task properties
-	t.setProperty("group", params.arm_group_name);
-	t.setProperty("eef", params.eef_name);
-	t.setProperty("hand", params.hand_group_name);
-	t.setProperty("hand_grasping_frame", params.hand_frame);
-	t.setProperty("ik_frame", params.hand_frame);
 
 	/****************************************************
 	 *                                                  *
@@ -137,11 +115,11 @@ bool PickPlaceTask::init(const rclcpp::Node::SharedPtr& node, const pick_place_t
 	 *                                                  *
 	 ***************************************************/
 	{
-		auto current_state = std::make_unique<stages::CurrentState>("current state");
+		auto noop = std::make_unique<stages::NoOp>("NoOp state");
 
 		// Verify that object is not attached
 		auto applicability_filter =
-		    std::make_unique<stages::PredicateFilter>("applicability test", std::move(current_state));
+		    std::make_unique<stages::PredicateFilter>("applicability test", std::move(noop));
 		applicability_filter->setPredicate([object = params.object_name](const SolutionBase& s, std::string& comment) {
 			if (s.start()->scene()->getCurrentState().hasAttachedBody(object)) {
 				comment = "object with id '" + object + "' is already attached and cannot be picked";
@@ -149,7 +127,7 @@ bool PickPlaceTask::init(const rclcpp::Node::SharedPtr& node, const pick_place_t
 			}
 			return true;
 		});
-		t.add(std::move(applicability_filter));
+		serial_container->insert(std::move(applicability_filter));
 	}
 
 	/****************************************************
@@ -163,7 +141,7 @@ bool PickPlaceTask::init(const rclcpp::Node::SharedPtr& node, const pick_place_t
 		stage->setGroup(params.hand_group_name);
 		stage->setGoal(params.hand_open_pose);
 		initial_state_ptr = stage.get();  // remember start state for monitoring grasp pose generator
-		t.add(std::move(stage));
+		serial_container->insert(std::move(stage));
 	}
 
 	/****************************************************
@@ -178,7 +156,7 @@ bool PickPlaceTask::init(const rclcpp::Node::SharedPtr& node, const pick_place_t
 		auto stage = std::make_unique<stages::Connect>("move to pick", planners);
 		stage->setTimeout(5.0);
 		stage->properties().configureInitFrom(Stage::PARENT);
-		t.add(std::move(stage));
+		serial_container->insert(std::move(stage));
 	}
 
 	/****************************************************
@@ -308,7 +286,7 @@ bool PickPlaceTask::init(const rclcpp::Node::SharedPtr& node, const pick_place_t
 		pick_stage_ptr = grasp.get();  // remember for monitoring place pose generator
 
 		// Add grasp container to task
-		t.add(std::move(grasp));
+		serial_container->insert(std::move(grasp));
 	}
 
 	/******************************************************
@@ -322,7 +300,7 @@ bool PickPlaceTask::init(const rclcpp::Node::SharedPtr& node, const pick_place_t
 		    "move to place", stages::Connect::GroupPlannerVector{ { params.arm_group_name, sampling_planner } });
 		stage->setTimeout(5.0);
 		stage->properties().configureInitFrom(Stage::PARENT);
-		t.add(std::move(stage));
+		serial_container->insert(std::move(stage));
 	}
 
 	/******************************************************
@@ -365,11 +343,7 @@ bool PickPlaceTask::init(const rclcpp::Node::SharedPtr& node, const pick_place_t
 			stage->setObject(params.object_name);
 
 			// Set target pose
-			geometry_msgs::msg::PoseStamped p;
-			p.header.frame_id = params.object_reference_frame;
-			p.pose = vectorToPose(params.place_pose);
-			p.pose.position.z += 0.5 * params.object_dimensions[0] + params.place_surface_offset;
-			stage->setPose(p);
+			stage->setPose(place_pose);
 			stage->setMonitoredStage(pick_stage_ptr);  // hook into successful pick solutions
 
 			// Compute IK
@@ -427,7 +401,7 @@ bool PickPlaceTask::init(const rclcpp::Node::SharedPtr& node, const pick_place_t
 		}
 
 		// Add place container to task
-		t.add(std::move(place));
+		serial_container->insert(std::move(place));
 	}
 
 	/******************************************************
@@ -440,12 +414,96 @@ bool PickPlaceTask::init(const rclcpp::Node::SharedPtr& node, const pick_place_t
 		stage->properties().configureInitFrom(Stage::PARENT, { "group" });
 		stage->setGoal(params.arm_home_pose);
 		stage->restrictDirection(stages::MoveTo::FORWARD);
-		t.add(std::move(stage));
+		serial_container->insert(std::move(stage));
 	}
 
-	// prepare Task structure for planning
+  return serial_container;
+}
+
+PickPlaceTask::PickPlaceTask(const std::string& task_name) : task_name_(task_name) {}
+
+bool PickPlaceTask::init(const rclcpp::Node::SharedPtr& node, const pick_place_task_demo::Params& params) {
+	RCLCPP_INFO(LOGGER, "Initializing task pipeline");
+
+	// Reset ROS introspection before constructing the new object
+	// TODO(v4hn): global storage for Introspection services to enable one-liner
+	task_.reset();
+	task_.reset(new moveit::task_constructor::Task());
+
+	// Individual movement stages are collected within the Task object
+	Task& t = *task_;
+	t.stages()->setName(task_name_);
+	t.loadRobotModel(node);
+
+	t.setPruning(true);
+
+	/* Create planners used in various stages. Various options are available,
+	   namely Cartesian, MoveIt pipeline, and joint interpolation. */
+	// Sampling planner
+	auto sampling_planner = std::make_shared<solvers::PipelinePlanner>(node);
+	sampling_planner->setProperty("goal_joint_tolerance", 1e-5);
+
+	// Cartesian planner
+	auto cartesian_planner = std::make_shared<solvers::CartesianPath>();
+	cartesian_planner->setMaxVelocityScalingFactor(1.0);
+	cartesian_planner->setMaxAccelerationScalingFactor(1.0);
+	cartesian_planner->setStepSize(.01);
+
+	// Set task properties
+	t.setProperty("group", params.arm_group_name);
+	t.setProperty("eef", params.eef_name);
+	t.setProperty("hand", params.hand_group_name);
+	t.setProperty("hand_grasping_frame", params.hand_frame);
+	t.setProperty("ik_frame", params.hand_frame);
+
+	/****************************************************
+	 *                                                  *
+	 *               Current State                      *
+	 *                                                  *
+	 ***************************************************/
+	{
+		auto current_state = std::make_unique<stages::CurrentState>("current state");
+		t.add(std::move(current_state));
+	}
+
+	double delta_angle = 360 / PICK_PLACE_REPETITIONS;
+	
+	// Repeat pick and place N times, placing the object around world Z axis doing a complete circle.
+	for (int i = 0; i < PICK_PLACE_REPETITIONS; ++i) {
+		geometry_msgs::msg::PoseStamped place_pose;
+
+		place_pose.header.frame_id = params.world_frame;
+		place_pose.pose = vectorToPose(params.place_pose);
+		place_pose.pose.position.z += 0.5 * params.object_dimensions[0] + params.place_surface_offset;
+
+		// Rotate the XY position around world Z by delta_angle
+		double angle = (i * delta_angle) * M_PI / 180.0;  // radians
+		double c = std::cos(angle);
+		double s = std::sin(angle);
+		double x = place_pose.pose.position.x;
+		double y = place_pose.pose.position.y;
+		place_pose.pose.position.x = c * x - s * y;
+		place_pose.pose.position.y = s * x + c * y;
+
+		t.add(std::move(PickPlaceContainer(params, t, sampling_planner, cartesian_planner, place_pose)));
+	}
+
 	try {
 		t.init();
+
+		// attach solution callbacks to all stages to collect timestamps
+		t.stages()->traverseRecursively([this](const Stage& stage, unsigned int) {
+			Stage& s = const_cast<Stage&>(stage);
+			std::string name = s.name();
+			
+			s.addSolutionCallback([this, name](const SolutionBase& sol) {
+				(void)sol;
+				auto now = std::chrono::steady_clock::now();
+				std::lock_guard<std::mutex> lock(this->stats_mutex_);
+				this->callback_times_.push_back(now);
+			});
+			return true;
+		});
 	} catch (InitStageException& e) {
 		RCLCPP_ERROR_STREAM(LOGGER, "Initialization failed: " << e);
 		return false;
@@ -457,7 +515,47 @@ bool PickPlaceTask::init(const rclcpp::Node::SharedPtr& node, const pick_place_t
 bool PickPlaceTask::plan(const std::size_t max_solutions) {
 	RCLCPP_INFO(LOGGER, "Start searching for task solutions");
 
-	return static_cast<bool>(task_->plan(max_solutions));
+	{
+		std::lock_guard<std::mutex> lock(stats_mutex_);
+		callback_times_.clear();
+	}
+	auto start_time = std::chrono::steady_clock::now();
+	bool ok = static_cast<bool>(task_->plan(max_solutions));
+	auto end_time = std::chrono::steady_clock::now();
+
+	std::vector<std::chrono::steady_clock::time_point> times_copy;
+	{
+		std::lock_guard<std::mutex> lock(stats_mutex_);
+		times_copy = callback_times_;
+	}
+
+	if (!times_copy.empty()) {
+		// aggregate per-second counts relative to start_time
+		std::map<long, int> counts_per_second;
+		for (const auto& tp : times_copy) {
+			long s = std::chrono::duration_cast<std::chrono::seconds>(tp - start_time).count();
+			if (s < 0)
+				s = 0;
+			counts_per_second[s]++;
+		}
+
+		long total_seconds = std::max<long>(1, static_cast<long>(
+			std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time).count()));
+
+		RCLCPP_INFO(LOGGER, "Solution-callbacks per second (relative to planning start):");
+		for (long s = 0; s <= total_seconds; ++s) {
+			int c = 0;
+			auto it = counts_per_second.find(s);
+			if (it != counts_per_second.end())
+				c = it->second;
+			RCLCPP_INFO_STREAM(LOGGER, "  " << s << "s: " << c);
+		}
+
+	} else {
+		RCLCPP_INFO(LOGGER, "No solution-callbacks recorded during planning.");
+	}
+
+	return ok;
 }
 
 bool PickPlaceTask::execute() {

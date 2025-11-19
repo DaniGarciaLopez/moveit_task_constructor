@@ -53,13 +53,19 @@
 #include <moveit/task_constructor/stages/modify_planning_scene.h>
 #include <moveit/task_constructor/stages/move_relative.h>
 #include <moveit/task_constructor/stages/move_to.h>
+#include <moveit/task_constructor/stages/noop.h>
 #include <moveit/task_constructor/stages/predicate_filter.h>
 #include <moveit/task_constructor/solvers/cartesian_path.h>
 #include <moveit/task_constructor/solvers/pipeline_planner.h>
 #include <moveit_task_constructor_msgs/action/execute_task_solution.hpp>
 #include <moveit_task_constructor_demo/pick_place_demo_parameters.hpp>
 
+#include <mutex>
+#include <chrono>
+
 #pragma once
+
+#define PICK_PLACE_REPETITIONS 9
 
 namespace moveit_task_constructor_demo {
 using namespace moveit::task_constructor;
@@ -82,5 +88,8 @@ public:
 private:
 	std::string task_name_;
 	moveit::task_constructor::TaskPtr task_;
+
+	std::mutex stats_mutex_;
+	std::vector<std::chrono::steady_clock::time_point> callback_times_;
 };
 }  // namespace moveit_task_constructor_demo
