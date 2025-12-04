@@ -100,14 +100,14 @@ void setupDemoScene(const pick_place_task_demo::Params& params) {
 	spawnObject(psi, createObject(params));
 }
 
-std::unique_ptr<SerialContainer> PickPlaceContainer(const pick_place_task_demo::Params& params, moveit::task_constructor::Task& t, const solvers::PlannerInterfacePtr& sampling_planner,
-										   const solvers::PlannerInterfacePtr& cartesian_planner, const geometry_msgs::msg::PoseStamped& place_pose)
-{
-
+std::unique_ptr<SerialContainer> PickPlaceContainer(const pick_place_task_demo::Params& params,
+                                                    moveit::task_constructor::Task& t,
+                                                    const solvers::PlannerInterfacePtr& sampling_planner,
+                                                    const solvers::PlannerInterfacePtr& cartesian_planner,
+                                                    const geometry_msgs::msg::PoseStamped& place_pose) {
 	auto serial_container = std::make_unique<SerialContainer>("pick/place");
 	t.properties().exposeTo(serial_container->properties(), { "eef", "hand", "group", "ik_frame" });
 	serial_container->properties().configureInitFrom(Stage::PARENT, { "eef", "hand", "group", "ik_frame" });
-
 
 	/****************************************************
 	 *                                                  *
@@ -118,8 +118,7 @@ std::unique_ptr<SerialContainer> PickPlaceContainer(const pick_place_task_demo::
 		auto noop = std::make_unique<stages::NoOp>("NoOp state");
 
 		// Verify that object is not attached
-		auto applicability_filter =
-		    std::make_unique<stages::PredicateFilter>("applicability test", std::move(noop));
+		auto applicability_filter = std::make_unique<stages::PredicateFilter>("applicability test", std::move(noop));
 		applicability_filter->setPredicate([object = params.object_name](const SolutionBase& s, std::string& comment) {
 			if (s.start()->scene()->getCurrentState().hasAttachedBody(object)) {
 				comment = "object with id '" + object + "' is already attached and cannot be picked";
@@ -417,7 +416,9 @@ std::unique_ptr<SerialContainer> PickPlaceContainer(const pick_place_task_demo::
 		serial_container->insert(std::move(stage));
 	}
 
-  return serial_container;
+	serial_container->setMaxSolutions(2);
+
+	return serial_container;
 }
 
 PickPlaceTask::PickPlaceTask(const std::string& task_name) : task_name_(task_name) {}
@@ -467,7 +468,7 @@ bool PickPlaceTask::init(const rclcpp::Node::SharedPtr& node, const pick_place_t
 	}
 
 	double delta_angle = 360 / PICK_PLACE_REPETITIONS;
-	
+
 	// Repeat pick and place N times, placing the object around world Z axis doing a complete circle.
 	for (int i = 0; i < PICK_PLACE_REPETITIONS; ++i) {
 		geometry_msgs::msg::PoseStamped place_pose;
@@ -495,7 +496,7 @@ bool PickPlaceTask::init(const rclcpp::Node::SharedPtr& node, const pick_place_t
 		t.stages()->traverseRecursively([this](const Stage& stage, unsigned int) {
 			Stage& s = const_cast<Stage&>(stage);
 			std::string name = s.name();
-			
+
 			s.addSolutionCallback([this, name](const SolutionBase& sol) {
 				(void)sol;
 				auto now = std::chrono::steady_clock::now();
@@ -539,8 +540,8 @@ bool PickPlaceTask::plan(const std::size_t max_solutions) {
 			counts_per_second[s]++;
 		}
 
-		long total_seconds = std::max<long>(1, static_cast<long>(
-			std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time).count()));
+		long total_seconds = std::max<long>(
+		    1, static_cast<long>(std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time).count()));
 
 		RCLCPP_INFO(LOGGER, "Solution-callbacks per second (relative to planning start):");
 		for (long s = 0; s <= total_seconds; ++s) {

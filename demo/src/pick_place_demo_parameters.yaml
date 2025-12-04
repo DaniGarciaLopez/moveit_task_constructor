@@ -39,7 +39,7 @@ pick_place_task_demo:
     default_value: true
   max_solutions:
     type: int
-    default_value: 10
+    default_value: -1
   arm_group_name:
     type: string
     validation:

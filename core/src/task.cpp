@@ -241,7 +241,16 @@ void Task::compute() {
 	}
 }
 
+moveit::core::MoveItErrorCode Task::plan() {
+	return plan(maxSolutions());
+}
+
 moveit::core::MoveItErrorCode Task::plan(size_t max_solutions) {
+	if (max_solutions == 0) {
+		// 0 does not make sense for this call, so interpret it as unlimited
+		max_solutions = std::numeric_limits<size_t>::max();
+	}
+
 	// ensure the preempt request is resetted once this method exits
 	auto guard = sg::make_scope_guard([this]() noexcept { this->resetPreemptRequest(); });
 
@@ -258,7 +267,7 @@ moveit::core::MoveItErrorCode Task::plan(size_t max_solutions) {
 	};
 	const double available_time = timeout();
 	const auto start_time = std::chrono::steady_clock::now();
-	while (canCompute() && (max_solutions == 0 || numSolutions() < max_solutions)) {
+	while (canCompute() && numSolutions() < max_solutions) {
 		if (impl->preempt_requested_)
 			return success_or(moveit::core::MoveItErrorCode::PREEMPTED);
 		if (std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count() >= available_time)
